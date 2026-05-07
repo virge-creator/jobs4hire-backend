@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.developer import Developer
 from app.schemas.developer import DeveloperCreate, DeveloperRead, DeveloperList, DeveloperUpdate
+from app.services.github import fetch_github_profile
 
 router = APIRouter(prefix="/developers", tags=["developers"])
 
@@ -71,3 +72,32 @@ async def update_developer(developer_id: uuid.UUID, data: DeveloperUpdate, db: A
     await db.commit()
     await db.refresh(dev)
     return dev
+
+
+@router.post("/{developer_id}/sync-github", response_model=DeveloperRead)
+async def sync_github_profile(developer_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Fetch and sync GitHub profile data for a developer."""
+    result = await db.execute(select(Developer).where(Developer.id == developer_id))
+    dev = result.scalar_one_or_none()
+    if not dev:
+        raise HTTPException(status_code=404, detail="Developer not found")
+
+    if not dev.github_username:
+        raise HTTPException(status_code=400, detail="Developer has no GitHub username set")
+
+    try:
+        github_data = await fetch_github_profile(dev.github_username)
+        dev.github_data = github_data
+        dev.github_linked = True
+
+        # Optionally update avatar if not set
+        if not dev.avatar_url and github_data.get("avatar_url"):
+            dev.avatar_url = github_data["avatar_url"]
+
+        await db.commit()
+        await db.refresh(dev)
+        return dev
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch GitHub profile: {str(e)}")
